@@ -1,0 +1,17 @@
+[package]
+name = "redis-h3"
+version = "0.1.0"
+authors = ["Cary Clark <clarkcb@gmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib"]
+name = "redish3"
+
+[dependencies]
+libc = "0.2"
+#redis-module = { version="0.9.2", features = ["experimental-api"]}
+redis-module = { git="https://github.com/clarkcb/redismodule-rs.git" }
+#redis-module = { version = "0.9.2", path = "/Users/cary/src/clarkcb/redismodule-rs" }
+#h3-rs = { git="https://github.com/jeromefroe/h3-rs.git" }
+h3-rs = { git="https://github.com/clarkcb/h3-rs.git" }
