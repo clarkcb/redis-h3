@@ -1,14 +1,46 @@
 #[macro_use]
 extern crate redis_module;
 
-use redis_module::native_types::RedisType;
-use redis_module::{raw as rawmod, NextArg};
-use redis_module::{Context, RedisError, RedisResult, RedisString, RedisValue, REDIS_OK};
-
 use std::os::raw::c_int;
 
 use h3_rs::{GeoCoord, H3Index};
-use std::convert::TryInto;
+use redis_module::{NextArg, raw as rawmod};
+use redis_module::{Context, RedisError, RedisResult, RedisValue};
+
+// all H3 indices used as scores must have this resolution
+const RESOLUTION: i32 = 15;
+
+// A discussion of why double is used instead of long long for zset scores:
+// https://github.com/antirez/redis/issues/6209
+
+// NOTE: we only need the bottom 52 bits of the 64-bit long long if we assume:
+//       1) reserved bit == 0      1 bit
+//       2) index mode == 1        4 bits
+//       3) reserved bits == 0     3 bits
+//       4) cell resolution == 15  4 bits
+// see:
+//       https://h3geo.org/docs/core-library/h3indexing
+
+// convert H3 long long to zset score double
+fn h3ll_to_score(mut h3ll: u64) -> f64 {
+    // dec: 4503599627370495
+    // hex: 0x000FFFFFFFFFFFFF
+    // bin: 0b0000_0000_0000_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111
+    let low52_mask: u64 = 0x000FFFFFFFFFFFFF;
+    h3ll &= low52_mask; // Unset top 12 bits
+    h3ll as f64
+}
+
+// convert zset score double to H3 long long
+fn score_to_h3ll(score: f64) -> u64 {
+    // dec: 644014746713980928
+    // hex: 0x08F0000000000000
+    // bin: 0b0000_1000_1111_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000
+    let high_mask: u64 = 0x08F0000000000000;
+    let mut h3ll = score as u64;
+    h3ll |= high_mask; // Set high mask bits
+    h3ll
+}
 
 ///
 /// H3.STATUS
@@ -35,8 +67,6 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
         ));
     }
 
-    const DEFAULT_RESOLUTION: i32 = 10;
-
     let mut args = args.into_iter().skip(1);
     let key = args.next_string()?;
 
@@ -49,16 +79,17 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     /* Create the argument vector to call ZADD in order to add all
      * the score,value pairs to the requested zset, where score is actually
      * an encoded version of lat,long. */
-    while (args.len() > 0) {
+    while args.len() > 0 {
         match (args.next_f64(), args.next_f64()) {
             (Ok(lng), Ok(lat)) => {
                 let name = args.next_string()?;
+                // TODO: need to verify valid lng/lat (should probably happen in GeoCoord::new)
                 let coord: GeoCoord = GeoCoord::new(lat, lng);
-                // TODO: determine default resolution, or add res arg to command
-                let h3 = coord.to_h3(DEFAULT_RESOLUTION).unwrap();
-                let h3dbl = u64::from_str_radix(h3.to_string().as_str(), 16).unwrap();
+                let h3_from_coord = coord.to_h3(RESOLUTION).unwrap();
+                let h3ll: u64 = u64::from_str_radix(h3_from_coord.to_string().as_str(), 16).unwrap();
+                let score: f64 = h3ll_to_score(h3ll);
 
-                newargs.push(format!("{:?}", h3dbl));
+                newargs.push(format!("{}", score));
                 newargs.push(name.clone());
             },
             _ => return Err(RedisError::from("Invalid lng or lat value"))
@@ -81,6 +112,8 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 ///
 /// this is an alternate to H3.ADD that takes an H3Index instead of lng/lat
 ///
+/// NOTE: h3idx must have resolution 15 to be considered valid, otherwise an error is raised
+///
 fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     if args.len() < 4 || args.len() % 2 != 0 {
         return Err(RedisError::from(
@@ -97,17 +130,23 @@ fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let mut newargs: Vec<String> = Vec::with_capacity(argc);
     newargs.push(key);
 
-    while (args.len() > 0) {
+    while args.len() > 0 {
         let h3key = args.next_string()?;
         let name = args.next_string()?;
 
         match H3Index::from_str(&h3key) {
-            Ok(h3index) => {
-                let h3dbl = u64::from_str_radix(h3key.as_str(), 16).unwrap();
-                newargs.push(format!("{:?}", h3dbl));
+            Ok(h3idx) => {
+                // verify resolution 15
+                if h3idx.resolution() != RESOLUTION {
+                    return Err(RedisError::from("Invalid h3idx resolution (must be 15)"))
+                }
+                let h3ll = u64::from_str_radix(h3key.as_str(), 16).unwrap();
+                let score = h3ll_to_score(h3ll);
+
+                newargs.push(format!("{}", score));
                 newargs.push(name.clone());
-            },
-            Err(err) => return Err(RedisError::from("Invalid h3idx value"))
+            }
+            Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
         }
     }
 
@@ -123,79 +162,72 @@ fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 }
 
 ///
-/// get_zscores - private function to get zscores for a list of zset elements for key
+/// get_zscores - private function to get zscores for a list of zset elements for key, users of
+/// this function will be responsible for determining whether scores are (convertible to) valid
+/// H3Index values
 ///
 fn get_zscores(ctx: &Context, key: String, elems: Vec<String>) -> RedisResult {
     let mut scores: Vec<RedisValue> = Vec::with_capacity(elems.len());
 
     let mut members = elems.into_iter();
-    while (members.len() > 0) {
+    while members.len() > 0 {
         let elem = members.next_string()?;
         match ctx.call("zscore", &[&key, &elem]) {
-        // match ctx.call_to_int("zscore", &[&key, &elem]) {
-        // match ctx.get_zscore(&key, &elem) {
             Ok(v) => {
-                println!("v: {:?}", v);
                 match v {
-                    RedisValue::Float(mut f) => {
-                        println!("f: {}", f);
-                        println!("f as u64: {}", f as u64);
-                        match H3Index::new(f as u64) {
-                            Ok(h3index) => {
-                                println!("h3index (from Float): {}", h3index);
-                                scores.push(f.into());
-                            },
-                            Err(err) => {
-                                println!("err: {:?}", err);
-                            }
-                        }
-                    }
-                    RedisValue::Integer(mut i) => {
-                        println!("i: {}", i);
-                        match H3Index::new(i as u64) {
-                            Ok(h3index) => {
-                                println!("h3index (from Integer): {}", h3index);
-                                scores.push(i.into());
-                            },
-                            Err(err) => {
-                                println!("err: {:?}", err);
-                            }
-                        }
+                    RedisValue::Float(f) => {
+                        scores.push(f.into());
                     },
-                    RedisValue::SimpleString(mut s) => {
-                        let score = match s.find('.') {
-                            Some(d) => {
-                                let f = s.parse::<f64>().unwrap();
-                                f as u64
-                            },
-                            None => s.parse::<u64>().unwrap()
-                        };
-                        // this is a terrible hack but seems to work (sort of)!!!
-                        // TODO: retrieve the double directly from redis instead
-                        //       of converting from string
-                        match (H3Index::new(score), H3Index::new(score - 1)) {
-                            (Err(_), Ok(h3index)) => {
-                                // in this case we use the score - 1 value
-                                // println!("h3index (-1): {}", h3index);
-                                scores.push(((score - 1) as i64).into());
-                            },
-                            (Ok(h3index), _) => {
-                                // println!("h3index (1): {}", h3index);
-                                scores.push((score as i64).into());
-                            },
-                            _ => return Err(RedisError::from("invalid H3Index value"))
-                        }
+                    RedisValue::SimpleString(s) => {
+                        let score: f64 = s.parse::<f64>().unwrap();
+                        scores.push(score.into());
                     },
                     // this means an entry wasn't found for the elem, ignoring for now
                     RedisValue::Null => scores.push(RedisValue::Null),
-                    _ => return Err(RedisError::from("v not an expected type (SimpleString or Null)"))
+                    _ => {
+                        println!("v: {:?}", v);
+                        return Err(RedisError::from("Unexpected type (SimpleString or Null)"))
+                    }
                 }
             },
-            Err(err) => return Err(RedisError::from("something went wrong"))
+            Err(err) => return Err(err)
         }
     }
 
     Ok(scores.into())
+}
+
+fn get_zscores_as_h3_indices(ctx: &Context, key: String, elems: Vec<String>) -> Result<Vec<Option<H3Index>>,RedisError> {
+    let mut opt_err: Option<&str> = None;
+    let h3_indices: Vec<Option<H3Index>> = match get_zscores(&ctx, key, elems) {
+        Ok(RedisValue::Array(scores)) => {
+            scores.iter()
+                .map(|s| {
+                    match s {
+                        RedisValue::Float(f) => {
+                            let h3ll = score_to_h3ll(*f);
+                            match H3Index::new(h3ll) {
+                                Ok(h3idx) => Some(h3idx),
+                                Err(_err) => {
+                                    opt_err = Some("Invalid h3idx value");
+                                    None
+                                }
+                            }
+                        },
+                        _ => None,
+                    }
+                }).collect()
+        },
+        Ok(v) => {
+            println!("v: {:?}", v);
+            vec![]
+        },
+        Err(err) => return Err(err)
+    };
+    if opt_err.is_some() {
+        return Err(RedisError::from(opt_err.unwrap()))
+    }
+    Ok(h3_indices)
 }
 
 ///
@@ -210,24 +242,17 @@ fn h3index_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let args: Vec<String> = args.collect();
 
-    match get_zscores(&ctx, key, args) {
-        Ok(RedisValue::Array(scores)) => {
-            let h3indices: Vec<RedisValue> = scores.iter()
-                .map(|s| {
-                    println!("s: {:?}", s);
-                    match s {
-                        RedisValue::Integer(i) => {
-                            let h3index = H3Index::new(i.to_owned() as u64).unwrap();
-                            h3index.to_string().into()
-                        },
-                        _ => RedisValue::Null,
-                    }
-                }).collect();
-            println!("{:?}", h3indices);
+    match get_zscores_as_h3_indices(&ctx, key, args) {
+        Ok(scores) => {
+            let h3indices: Vec<RedisValue> = scores.iter().map(|opt_idx| {
+                match opt_idx {
+                    Some(h3idx) => h3idx.to_string().into(),
+                    None => RedisValue::Null
+                }
+            }).collect();
             Ok(h3indices.into())
-        },
+        }
         Err(err) => Err(err),
-        _ => return Err(RedisError::from("scores not an expected type: Array"))
     }
 }
 
@@ -243,26 +268,20 @@ fn h3pos_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let args: Vec<String> = args.collect();
 
-    match get_zscores(&ctx, key, args) {
-        Ok(RedisValue::Array(scores)) => {
-            let h3indices: Vec<RedisValue> = scores.iter()
-                .map(|s| {
-                    println!("s: {:?}", s);
-                    match s {
-                        RedisValue::Integer(s) => {
-                            let h3index = H3Index::new(s.to_owned() as u64).unwrap();
-                            let coord = h3index.to_geo();
-                            vec![coord.lon.to_string(), coord.lat.to_string()].into()
-                        },
-                        _ => RedisValue::Null,
-                    }
-
-                }).collect();
-            // println!("{:?}", h3indices);
+    match get_zscores_as_h3_indices(&ctx, key, args) {
+        Ok(scores) => {
+            let h3indices: Vec<RedisValue> = scores.iter().map(|opt_idx| {
+                match opt_idx {
+                    Some(h3idx) => {
+                        let coord = h3idx.to_geo();
+                        vec![coord.lon.to_string(), coord.lat.to_string()].into()
+                    },
+                    None => RedisValue::Null
+                }
+            }).collect();
             Ok(h3indices.into())
-        },
+        }
         Err(err) => Err(err),
-        _ => return Err(RedisError::from("scores not an expected type: Array"))
     }
 }
 
@@ -290,8 +309,9 @@ redis_module! {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use redis_module::RedisValue;
+
+    use super::*;
 
     fn run_status() -> RedisResult {
         h3status_command(
