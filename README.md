@@ -19,6 +19,7 @@ The module depends on the following crates:
   correct determination of corresponding cells at all resolutions, and also provides best results for distance
   calculations, etc.
 * Since elements' scores will be highest resolution H3 indices, their locations will be accurate to within 1m squared.
+* The terms element and member and interchangeable, as are H3 key and H3 index
 
 ### Commands
 These are the currently implemented commands:
@@ -32,15 +33,18 @@ These are the currently implemented commands:
   elements
 * __`H3.POS [key] [elem1] ... [elemN]`__ - similar to `GEOPOS` command, but returns the centroid lng and lat for the
   H3 indices for the given elements
+* __`H3.CELL [key] [h3idx]`__ - get list of elements contained in the cell of the given H3 index (any resolution
+  is allowed for H3 indices for this command)
+* __`H3.COUNT [key] [h3idx]`__ - get count of elements contained in the cell of the given H3 index (any resolution
+  is allowed for H3 indices for this command)
+* __`H3.SCAN [key] [cursor]`__ - similar to the `ZSCAN` command, but iterates over elements with their H3 indices
 
 These are some other possible commands to implement:
-* __`H3.ININDEX [key] [h3idx]`__ - get list of elements contained in the cell of the given H3 index (any resolution
-  should be allowed for H3 keys for this command)
 * __`H3.REMBYINDEX [key] [h3idx1] ... [h3idxN]`__ - remove the elems matching any of the given H3 indices
 
 These are the Geo commands that there are currently no counterparts for (and not sure if there will be):
 * __`GEODIST [key] [elem1] [elem2] ...`__ - return the distance between two elements in the geospatial index
-* __`GEORADIUS [key] [lng] [lng] [radius] ...`__ - return the elements that are within the border of the area
+* __`GEORADIUS [key] [lng] [lat] [radius] ...`__ - return the elements that are within the border of the area
   specified with the center lng/lat position and the max distance from the center (radius)
 * __`GEORADIUSBYMEMBER [key] [elem] [radius] ...`__ - return the elements that are within the border of the area
   specified with element's position and the max distance from the position (radius)
@@ -123,24 +127,48 @@ $ redis-cli
    4) "3479447370796909"
 127.0.0.1:6379> H3.ADD H3Sicily 13.361389 38.115556 "Palermo" 15.087269 37.502669 "Catania"
 (integer) 2
-127.0.0.1:6379> ZSCAN H3Sicily 0
-1) "0"
-2) 1) "Palermo"
-   2) "538352348825157"
-   3) "Catania"
-   4) "1112003081711909"
-127.0.0.1:6379> H3.ADDBYINDEX H3Sicily 8f1e9a0ec840645 "Palermo-idx" 8f3f35c64acb125 "Catania-idx"
+127.0.0.1:6379> H3.ADDBYINDEX H3Sicily 8f1e9a0ec840645 "Palermo-key" 8f3f35c64acb125 "Catania-key"
 (integer) 2
+127.0.0.1:6379> H3.ADDBYINDEX H3Sicily 644553099062806085 "Palermo-idx" 645126749795692837 "Catania-idx"
+(integer) 2
+127.0.0.1:6379> ZCARD H3Sicily
+(integer) 6
 127.0.0.1:6379> ZSCAN H3Sicily 0
 1) "0"
+2)  1) "Palermo"
+    2) "538352348825157"
+    3) "Palermo-idx"
+    4) "538352348825157"
+    5) "Palermo-key"
+    6) "538352348825157"
+    7) "Catania"
+    8) "1112003081711909"
+    9) "Catania-idx"
+   10) "1112003081711909"
+   11) "Catania-key"
+   12) "1112003081711909"
+127.0.0.1:6379> H3.SCAN H3Sicily 0
+1) "0"
+2)  1) "Palermo"
+    2) "8f1e9a0ec840645"
+    3) "Palermo-idx"
+    4) "8f1e9a0ec840645"
+    5) "Palermo-key"
+    6) "8f1e9a0ec840645"
+    7) "Catania"
+    8) "8f3f35c64acb125"
+    9) "Catania-idx"
+   10) "8f3f35c64acb125"
+   11) "Catania-key"
+   12) "8f3f35c64acb125"
+127.0.0.1:6379> H3.SCAN H3Sicily 0 MATCH P*
+1) "0"
 2) 1) "Palermo"
-   2) "538352348825157"
+   2) "8f1e9a0ec840645"
    3) "Palermo-idx"
-   4) "538352348825157"
-   5) "Catania"
-   6) "1112003081711909"
-   7) "Catania-idx"
-   8) "1112003081711909"
+   4) "8f1e9a0ec840645"
+   5) "Palermo-key"
+   6) "8f1e9a0ec840645"
 127.0.0.1:6379> GEOHASH GEOSicily "Palermo" "Catania"
 1) "sqc8b49rny0"
 2) "sqdtr74hyu0"
@@ -157,6 +185,22 @@ $ redis-cli
    2) "38.115552632253305"
 2) 1) "15.087270305767186"
    2) "37.50266586290179"
+127.0.0.1:6379> H3.COUNT H3Sicily 833f35fffffffff
+(integer) 3
+127.0.0.1:6379> H3.CELL H3Sicily 833f35fffffffff
+1) "Catania"
+2) "Catania-idx"
+3) "Catania-key"
+127.0.0.1:6379> H3.CELL H3Sicily 833f35fffffffff WITHINDICES
+1) "Catania"
+2) "8f3f35c64acb125"
+3) "Catania-idx"
+4) "8f3f35c64acb125"
+5) "Catania-key"
+6) "8f3f35c64acb125"
+127.0.0.1:6379> H3.CELL H3Sicily 833f35fffffffff WITHINDICES LIMIT 0 1
+1) "Catania"
+2) "8f3f35c64acb125"
 ```
 
 To verify the values, here are some H3 CLI commands with output to compare against:

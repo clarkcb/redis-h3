@@ -2,11 +2,11 @@
 extern crate redis_module;
 
 use std::os::raw::c_int;
-use regex::Regex;
 
-use h3_rs::{GeoCoord, H3Index, Error as H3Error};
-use redis_module::{NextArg, raw as rawmod, RedisString};
+use h3_rs::{Error as H3Error, GeoCoord, H3Index};
+use redis_module::{NextArg, raw as rawmod};
 use redis_module::{Context, RedisError, RedisResult, RedisValue};
+use regex::Regex;
 
 // H3 indices used as scores must have this resolution
 const MAX_RESOLUTION: i32 = 15;
@@ -76,7 +76,7 @@ fn score_to_h3ll(score: f64) -> u64 {
 // convert string to H3Index, string can be either a valid hex key or long long value
 fn str_to_h3(h3str: &String) -> Result<H3Index, H3Error> {
     let h3_key_regex: Regex = Regex::new("^(0x)?[0-9A-Za-z]{15}$").unwrap();
-    if (h3_key_regex.is_match(&h3str)) {
+    if h3_key_regex.is_match(&h3str) {
         match H3Index::from_str(&h3str) {
             Ok(h3idx) => {
                 // println!("h3idx (from key): {:?}", h3idx);
@@ -145,7 +145,7 @@ fn index_max_child(h3ll: u64) -> u64 {
     let mut next_res = res + 1;
     while next_res <= 15 {
         let diff = 15 - next_res;
-        child_index_bits += (6 << (3 * diff) as u64);
+        child_index_bits += 6 << (3 * diff) as u64;
         next_res += 1;
     }
 
@@ -625,7 +625,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                         return Err(RedisError::from("Unexpected type (not SimpleString)"))
                     }
                 };
-                h3scan_result.push(cursor.into());
+                h3scan_result.push(next_cursor.into());
                 match zscan_result.next() {
                     Some(RedisValue::Array(elems_with_scores)) => {
                         let mut elems_with_indices: Vec<RedisValue> =
