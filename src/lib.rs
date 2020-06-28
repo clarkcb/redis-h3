@@ -568,6 +568,111 @@ fn h3radiusbyindex_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
     Err("Command not implemented".into())
 }
 
+///
+/// H3.SCAN key cursor [MATCH pattern] [COUNT count]
+///
+/// this is a translation of the ZSCAN command, but instead of returning elements with scores,
+/// it returns elements with H3 indices
+///
+fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
+    let syntax_err_msg = "syntax error. Try H3.SCAN key cursor [MATCH pattern] [COUNT count]";
+    if args.len() < 3 {
+        return Err(RedisError::from(syntax_err_msg));
+    }
+
+    let mut args = args.into_iter().skip(1);
+    let key = args.next_string()?;
+    let cursor = match args.next_i64() {
+        Ok(c) => c,
+        Err(_err) => return Err(RedisError::from("invalid cursor"))
+    };
+    let mut match_pattern: Option<String> = None;
+    let mut count: Option<i64> = None;
+
+    while let Ok(arg) = args.next_string() {
+        match arg.to_uppercase().as_str() {
+            "MATCH" => match_pattern = Some(args.next_string()?),
+            "COUNT" => count = Some(args.next_i64()?),
+            _ => {
+                return Err(RedisError::from(syntax_err_msg));
+            }
+        }
+    }
+
+    let mut newargs: Vec<String> = vec![key, cursor.to_string()];
+    if match_pattern.is_some() {
+        newargs.push(String::from("match"));
+        newargs.push(match_pattern.unwrap());
+    }
+    if count.is_some() {
+        newargs.push(String::from("count"));
+        newargs.push(count.unwrap().to_string());
+    }
+
+    let newargs: Vec<&str> = newargs.iter().map(|s| {
+        s.as_str()
+    }).collect();
+    let newargs = &newargs[..];
+
+    match ctx.call("zscan", newargs) {
+        Ok(v) => match &v {
+            RedisValue::Array(zscan_result) => {
+                let mut h3scan_result: Vec<RedisValue> = Vec::with_capacity(zscan_result.len());
+                let mut zscan_result = zscan_result.into_iter();
+                let next_cursor = match zscan_result.next() {
+                    Some(RedisValue::SimpleString(s)) => s,
+                    _ => {
+                        return Err(RedisError::from("Unexpected type (not SimpleString)"))
+                    }
+                };
+                h3scan_result.push(cursor.into());
+                match zscan_result.next() {
+                    Some(RedisValue::Array(elems_with_scores)) => {
+                        let mut elems_with_indices: Vec<RedisValue> =
+                            Vec::with_capacity(elems_with_scores.len());
+
+                        let mut i = 0;
+                        while i < elems_with_scores.len() {
+                            let elem: &String = match &elems_with_scores[i] {
+                                RedisValue::SimpleString(s) => s,
+                                _ => {
+                                    return Err(RedisError::from("Unexpected type (not SimpleString)"))
+                                }
+                            };
+                            if i % 2 != 0 {
+                                let score: f64 = elem.parse::<f64>().unwrap();
+                                let h3ll = score_to_h3ll(score);
+
+                                match H3Index::new(h3ll) {
+                                    Ok(h3idx) => {
+                                        elems_with_indices.push(h3idx.to_string().into())
+                                    },
+                                    Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+                                }
+                            } else {
+                                elems_with_indices.push(elem.into())
+                            }
+
+                            i += 1;
+                        }
+                        h3scan_result.push(elems_with_indices.into());
+                    },
+                    _ => return Err(RedisError::from("Unexpected type (not Array)"))
+                }
+
+                Ok(h3scan_result.into())
+            }
+            // this means an entry wasn't found for the elem, ignoring for now
+            RedisValue::Null => Ok(RedisValue::Null),
+            _ => {
+                println!("v: {:?}", &v);
+                return Err(RedisError::from("Unexpected type (not Array or Null)"))
+            }
+        },
+        Err(err) => return Err(err)
+    }
+}
+
 //////////////////////////////////////////////////////
 
 pub extern "C" fn init(_raw_ctx: *mut rawmod::RedisModuleCtx) -> c_int {
@@ -590,6 +695,7 @@ redis_module! {
         ["h3.dist", h3dist_command, "readonly", 1, 1, 1],
         ["h3.radius", h3radius_command, "readonly", 1, 1, 1],
         ["h3.radiusbyindex", h3radiusbyindex_command, "readonly", 1, 1, 1],
+        ["h3.scan", h3scan_command, "readonly", 1, 1, 1],
     ],
 }
 
