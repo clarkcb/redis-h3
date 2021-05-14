@@ -430,21 +430,6 @@ fn h3count_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     ctx.call("zcount", newargs)
 }
 
-/// a translation of the GEODIST command
-fn h3dist_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
-}
-
-/// a translation of the GEORADIUS command
-fn h3radius_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
-}
-
-/// a translation of the GEORADIUSBYMEMBER command
-fn h3radiusbyindex_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
-}
-
 ///
 /// H3.SCAN key cursor [MATCH pattern] [COUNT count]
 ///
@@ -550,6 +535,164 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     }
 }
 
+fn unit_str_to_conversion(unit: &String) -> Result<f64,RedisError> {
+    let conversion = match unit.to_uppercase().as_str() {
+        "M" => 1.0,
+        "KM" => 1000.0,
+        "FT" => 0.3048,
+        "MI" => 1609.34,
+        _ => -1.0
+    };
+    if conversion > -1.0 {
+        Ok(conversion)
+    } else {
+        Err(RedisError::from("unsupported unit provided. please use m, km, ft, mi"))
+    }
+}
+
+///
+/// H3.DIST key elem1 elem2 [unit]
+///
+/// this is a translation of the GEODIST command
+///
+fn h3dist_command(ctx: &Context, args: Vec<String>) -> RedisResult {
+    let syntax_err_msg = "syntax error. Try H3.DIST key elem1 elem2 [unit]";
+    if args.len() < 4 {
+        return Err(RedisError::from(syntax_err_msg));
+    }
+
+    let mut args = args.into_iter().skip(1);
+    let key = args.next_string()?;
+    let elem1 = args.next_string()?;
+    let elem2 = args.next_string()?;
+    let mut to_meter: f64 = 1.0;
+
+    if let Ok(unit) = args.next_string() {
+        match unit_str_to_conversion(&unit) {
+            Ok(conversion) => to_meter = conversion,
+            Err(err) => {
+                return Err(err);
+            }
+        }
+    }
+
+    match get_zscores_as_h3_indices(&ctx, &key, vec![elem1, elem2]) {
+        Ok(vec_opt_h3indices) => {
+            let dist: f64 = match (vec_opt_h3indices.get(0), vec_opt_h3indices.get(1)) {
+                (Some(Some(h3idx1)), Some(Some(h3idx2))) => {
+                    let coord1: GeoCoord = h3idx1.to_geo();
+                    let coord2: GeoCoord = h3idx2.to_geo();
+                    geohash_get_distance(coord1.lon, coord1.lat, coord2.lon, coord2.lat) / to_meter
+                },
+                _ => -1.0
+            };
+            if dist > -1.0 {
+                Ok(format!("{:.4}", dist).into())
+            } else {
+                Err(RedisError::from("error trying to get distance"))
+            }
+        },
+        Err(err) => Err(err)
+    }
+}
+
+///
+/// H3.REMBYINDEX key h3idx1 ... [h3idxN]
+///
+/// remove elements that match a given H3 index
+///
+fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
+    let syntax_err_msg = "syntax error. Try H3.REMBYINDEX key h3idx1 ... [h3idxN]";
+    if args.len() < 3 {
+        return Err(RedisError::from(syntax_err_msg));
+    }
+
+    let mut args = args.into_iter().skip(1);
+    let key = args.next_string()?;
+
+    let zremargc: usize = 1 + args.len(); /* ZREM key elem ... */
+
+    let mut zremargs: Vec<String> = Vec::with_capacity(zremargc);
+    zremargs.push(key.clone());
+
+    while let Ok(h3key) = args.next_string() {
+
+        let h3idx = match str_to_h3(&h3key) {
+            Ok(h3idx) => h3idx,
+            Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+        };
+    
+        match get_cell_members(ctx, &key, &h3idx, false, false, 0, 0) {
+            Ok(v) => {
+                match &v {
+                    RedisValue::Array(elems) => {
+                        if !elems.is_empty() {
+                            let mut i = 0;
+                            while i < elems.len() {
+                                match &elems[i] {
+                                    RedisValue::SimpleString(name) => {
+                                        zremargs.push(name.to_owned());
+                                    },
+                                    RedisValue::BulkString(name) => {
+                                        zremargs.push(name.to_owned());
+                                    },
+                                    _ => {
+                                        println!("v: {:?}", &v);
+                                        return Err(RedisError::from("Unexpected types (not SimpleString)"))
+                                    }
+                                }
+                                i += 1;
+                            }
+                        }
+                    },
+                    // this means an entry wasn't found for the elem, do nothing for now
+                    RedisValue::Null => {
+                        println!("v: {:?}", v);
+                    },
+                    _ => {
+                        println!("v: {:?}", v);
+                        return Err(RedisError::from("Unexpected type (not Array or Null)"))
+                    }
+                }
+            },
+            Err(err) => return Err(err)
+        }
+    }
+
+    if zremargs.len() > 1 {
+        let zremargs: Vec<&str> = zremargs.iter().map(|s| {
+            s.as_str()
+        }).collect();
+        let zremargs = &zremargs[..];
+    
+        // call zadd with zremargs
+        ctx.call("zrem", zremargs)
+    } else {
+        let zero: i64 = 0;
+        Ok(zero.into())
+    }
+}
+
+/// a translation of the GEORADIUS command
+fn h3radius_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
+    Err("Command not implemented".into())
+}
+
+/// a translation of the GEORADIUSBYMEMBER command
+fn h3radiusbyindex_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
+    Err("Command not implemented".into())
+}
+
+/// a translation of the GEOSEARCH command
+fn h3search_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
+    Err("Command not implemented".into())
+}
+
+/// a translation of the GEOSEARCHSTORE command
+fn h3searchstore_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
+    Err("Command not implemented".into())
+}
+
 //////////////////////////////////////////////////////
 
 pub extern "C" fn init(_raw_ctx: *mut rawmod::RedisModuleCtx) -> c_int {
@@ -570,9 +713,12 @@ redis_module! {
         ["h3.cell", h3cell_command, "readonly", 1, 1, 1],
         ["h3.count", h3count_command, "readonly", 1, 1, 1],
         ["h3.dist", h3dist_command, "readonly", 1, 1, 1],
+        ["h3.rembyindex", h3rembyindex_command, "write", 1, 1, 1],
         ["h3.radius", h3radius_command, "readonly", 1, 1, 1],
         ["h3.radiusbyindex", h3radiusbyindex_command, "readonly", 1, 1, 1],
         ["h3.scan", h3scan_command, "readonly", 1, 1, 1],
+        ["h3.search", h3search_command, "readonly", 1, 1, 1],
+        ["h3.searchstore", h3searchstore_command, "readonly", 1, 1, 1],
     ],
 }
 
