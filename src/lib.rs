@@ -3,155 +3,16 @@ extern crate redis_module;
 
 use std::os::raw::c_int;
 
-use h3_rs::{Error as H3Error, GeoCoord, H3Index};
+use h3_rs::{GeoCoord, H3Index};
 use redis_module::{NextArg, raw as rawmod};
 use redis_module::{Context, RedisError, RedisResult, RedisValue};
-use regex::Regex;
 
-// H3 indices used as scores must have this resolution
-const MAX_RESOLUTION: i32 = 15;
+use crate::geoutil::{geohash_get_distance};
+use crate::h3util::{h3ll_to_score, index_max_child, index_min_child,
+                    MAX_RESOLUTION, score_to_h3ll, str_to_h3};
 
-const H3_RES_OFFSET: u64 = 52;
-const H3_RES_MASK: u64 = 15 << H3_RES_OFFSET;
-const H3_RES_MASK_NEGATIVE: u64 = !H3_RES_MASK;
-
-// H3 cell index representation
-// 1) 1 bit reserved and set to 0,
-// 2) 4 bits to indicate the index mode,
-// 3) 3 bits reserved and set to 0,
-// 4) 4 bits to indicate the cell resolution 0-15,
-// 5) 7 bits to indicate the base cell 0-121, and
-// 6) 3 bits to indicate each subsequent digit 0-6 from resolution 1 up to the resolution
-//    of the cell (45 bits total are reserved for resolutions 1-15)
-
-// |1|   2|  3|   4|      5|6...
-//  0 0001 000 0000 0000000 1_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111
-
-// H3 base cells
-// 0: dec: 576495936675512319
-//    hex: 8001fffffffffff
-//    bin: 0b0000_1000_0000_0000_0001_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111
-
-// masks out the top 12 bits
-// dec: 4503599627370495
-// hex: 0x000FFFFFFFFFFFFF
-// bin: 0b0000_0000_0000_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111
-const LOW52_MASK: u64 = 0x000FFFFFFFFFFFFF;
-
-// assumes mode == 1 and resolution == 15
-// >>52 to get resolution
-// dec: 644014746713980928
-// hex: 0x08F0000000000000
-// bin: 0b0000_1000_1111_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000
-const HIGH12_BITS: u64 = 0x08F0000000000000;
-
-
-// A discussion of why double is used instead of long long for zset scores:
-// https://github.com/antirez/redis/issues/6209
-
-// NOTE: we only need the bottom 52 bits of the 64-bit long long if we assume:
-//       1) reserved bit == 0      1 bit
-//       2) index mode == 1        4 bits
-//       3) reserved bits == 0     3 bits
-//       4) cell resolution == 15  4 bits
-// see:
-//       https://h3geo.org/docs/core-library/h3indexing
-
-// convert H3 long long to zset score double
-fn h3ll_to_score(mut h3ll: u64) -> f64 {
-    h3ll &= LOW52_MASK; // Unset top 12 bits
-    h3ll as f64
-}
-
-// convert zset score double to H3 long long
-fn score_to_h3ll(score: f64) -> u64 {
-    // dec: 644014746713980928
-    // hex: 0x08F0000000000000
-    // bin: 0b0000_1000_1111_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000
-    let mut h3ll = score as u64;
-    h3ll |= HIGH12_BITS; // Set high bits
-    h3ll
-}
-
-// convert string to H3Index, string can be either a valid hex key or long long value
-fn str_to_h3(h3str: &String) -> Result<H3Index, H3Error> {
-    let h3_key_regex: Regex = Regex::new("^(0x)?[0-9A-Za-z]{15}$").unwrap();
-    if h3_key_regex.is_match(&h3str) {
-        match H3Index::from_str(&h3str) {
-            Ok(h3idx) => {
-                // println!("h3idx (from key): {:?}", h3idx);
-                Ok(h3idx)
-            },
-            Err(_err) => return Err(H3Error::InvalidString { value: h3str.clone() })
-        }
-    } else {
-        match u64::from_str_radix(h3str.as_str(), 10) {
-            Ok(h3ll) => match H3Index::new(h3ll) {
-                Ok(h3idx) => {
-                    // println!("h3idx (from u64): {:?}", h3idx);
-                    Ok(h3idx)
-                },
-                Err(_err) => return Err(H3Error::InvalidIndex { value: h3ll })
-            },
-            Err(_err) => return Err(H3Error::FailedConversion)
-        }
-    }
-}
-
-// this bypasses having to convert to and from H3Index
-fn get_resolution(h3ll: u64) -> u8 {
-    ((h3ll & H3_RES_MASK) >> H3_RES_OFFSET) as u8
-}
-
-fn set_resolution(h3ll: u64, new_res: u8) -> u64 {
-    (h3ll & H3_RES_MASK_NEGATIVE) | (new_res as u64) << H3_RES_OFFSET
-}
-
-/// for a given H3Index as u64, get the lowest valued res 15 child cell
-fn index_min_child(h3ll: u64) -> u64 {
-    let res = get_resolution(h3ll);
-    // if res == 15 it's already the max (has no children)
-    if res == 15 {
-        return h3ll;
-    }
-
-    let mut min_child: u64 = set_resolution(h3ll, 15);
-
-    // shift down and back up to zero-out the child index bits
-    let child_index_bit_length = (15 - res) * 3;
-    min_child = min_child >> (child_index_bit_length as u64);
-    min_child = min_child << (child_index_bit_length as u64);
-
-    min_child
-}
-
-/// for a given H3Index as u64, get the highest valued res 15 child cell
-fn index_max_child(h3ll: u64) -> u64 {
-    let res = get_resolution(h3ll);
-    // if res == 15 it's already the max (has no children)
-    if res == 15 {
-        return h3ll;
-    }
-
-    let mut max_child: u64 = set_resolution(h3ll, 15);
-
-    // shift down and back up to zero-out the child index bits
-    let child_index_bit_length = (15 - res) * 3;
-    max_child = max_child >> (child_index_bit_length as u64);
-    max_child = max_child << (child_index_bit_length as u64);
-
-    // set all child cell indices to highest (6)
-    let mut child_index_bits: u64 = 0;
-    let mut next_res = res + 1;
-    while next_res <= 15 {
-        let diff = 15 - next_res;
-        child_index_bits += 6 << (3 * diff) as u64;
-        next_res += 1;
-    }
-
-    max_child |= child_index_bits;
-    max_child
-}
+mod h3util;
+mod geoutil;
 
 ///
 /// H3.STATUS
@@ -180,7 +41,7 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let key = args.next_string()?;
 
     let elements: usize = args.len() / 3;
-    let argc: usize = 2+elements*2; /* ZADD key score elem ... */
+    let argc: usize = 2 + elements * 2; /* ZADD key score elem ... */
 
     let mut newargs: Vec<String> = Vec::with_capacity(argc);
     newargs.push(key);
@@ -277,13 +138,13 @@ fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 /// this function will be responsible for determining whether scores are (convertible to) valid
 /// H3Index values
 ///
-fn get_zscores(ctx: &Context, key: String, elems: Vec<String>) -> RedisResult {
+fn get_zscores(ctx: &Context, key: &String, elems: Vec<String>) -> RedisResult {
     let mut scores: Vec<RedisValue> = Vec::with_capacity(elems.len());
 
     let mut members = elems.into_iter();
     while members.len() > 0 {
         let elem = members.next_string()?;
-        match ctx.call("zscore", &[&key, &elem]) {
+        match ctx.call("zscore", &[key, &elem]) {
             Ok(v) => {
                 match v {
                     RedisValue::Float(f) => {
@@ -310,9 +171,9 @@ fn get_zscores(ctx: &Context, key: String, elems: Vec<String>) -> RedisResult {
 
 /// call this function to get zset scores converted to H3Index instances (calls get_zscores
 /// and does the conversion)
-fn get_zscores_as_h3_indices(ctx: &Context, key: String, elems: Vec<String>) -> Result<Vec<Option<H3Index>>,RedisError> {
+fn get_zscores_as_h3_indices(ctx: &Context, key: &String, elems: Vec<String>) -> Result<Vec<Option<H3Index>>,RedisError> {
     let mut opt_err: Option<&str> = None;
-    let h3_indices: Vec<Option<H3Index>> = match get_zscores(&ctx, key, elems) {
+    let h3_indices: Vec<Option<H3Index>> = match get_zscores(&ctx, &key, elems) {
         Ok(RedisValue::Array(scores)) => {
             scores.iter()
                 .map(|s| {
@@ -355,9 +216,9 @@ fn h3index_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let args: Vec<String> = args.collect();
 
-    match get_zscores_as_h3_indices(&ctx, key, args) {
-        Ok(scores) => {
-            let h3indices: Vec<RedisValue> = scores.iter().map(|opt_idx| {
+    match get_zscores_as_h3_indices(&ctx, &key, args) {
+        Ok(vec_opt_h3indices) => {
+            let h3indices: Vec<RedisValue> = vec_opt_h3indices.iter().map(|opt_idx| {
                 match opt_idx {
                     Some(h3idx) => h3idx.to_string().into(),
                     None => RedisValue::Null
@@ -372,8 +233,8 @@ fn h3index_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 ///
 /// H3.POS key elem1 elem2 ... elemN
 ///
-/// Returns an array with lng/lat arrays of the positions of
-/// the specified elements ("translation" of geoposCommand)
+/// Returns an array with lng/lat arrays of the centroids of H3 indices
+/// for the specified elements ("translation" of geoposCommand)
 ///
 fn h3pos_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let mut args = args.into_iter().skip(1);
@@ -381,9 +242,9 @@ fn h3pos_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let args: Vec<String> = args.collect();
 
-    match get_zscores_as_h3_indices(&ctx, key, args) {
-        Ok(scores) => {
-            let h3indices: Vec<RedisValue> = scores.iter().map(|opt_idx| {
+    match get_zscores_as_h3_indices(&ctx, &key, args) {
+        Ok(vec_opt_h3indices) => {
+            let h3pos: Vec<RedisValue> = vec_opt_h3indices.iter().map(|opt_idx| {
                 match opt_idx {
                     Some(h3idx) => {
                         let coord = h3idx.to_geo();
@@ -392,55 +253,24 @@ fn h3pos_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                     None => RedisValue::Null
                 }
             }).collect();
-            Ok(h3indices.into())
+            Ok(h3pos.into())
         }
         Err(err) => Err(err),
     }
 }
 
 ///
-/// H3.CELL key h3idx [WITHINDICES] [LIMIT offset count]
+/// get_cell_members
 ///
-/// Returns an array of the elements in the zset that are contained within the H3 cell
-/// for the given index
+/// Takes an H3 key (cell or index as string) and optional limit values and returns
+/// all elems whose indices are children of the given H3 key
 ///
-fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
-    let syntax_err_msg = "syntax error. Try H3.CELL key h3idx [WITHINDICES] [LIMIT offset count]";
-    if args.len() < 3 {
-        return Err(RedisError::from(syntax_err_msg));
-    }
-
-    let mut args = args.into_iter().skip(1);
-    let key = args.next_string()?;
-    let h3key = args.next_string()?;
-    let mut withindices = false;
-    let mut limit = false;
-    let mut offset = 0;
-    let mut count = 0;
-
-    while let Ok(arg) = args.next_string() {
-        match arg.to_uppercase().as_str() {
-            "WITHINDICES" => {
-                withindices = true;
-            }
-            "LIMIT" => {
-                limit = true;
-                if args.len() < 2 {
-                    return Err(RedisError::from(syntax_err_msg));
-                }
-                offset = args.next_i64()?;
-                count = args.next_i64()?;
-            }
-            _ => {
-                return Err(RedisError::from(syntax_err_msg));
-            }
-        }
-    }
-
-    let h3idx = match str_to_h3(&h3key) {
-        Ok(h3idx) => h3idx,
-        Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
-    };
+fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: bool, limit: bool,
+                    offset: i64, count: i64) -> RedisResult {
+    // let h3idx = match str_to_h3(&h3key) {
+    //     Ok(h3idx) => h3idx,
+    //     Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+    // };
 
     // it would be better to get the u64 value from h3idx (commented line under next),
     // but member is not pub
@@ -455,7 +285,7 @@ fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let max_score = h3ll_to_score(max_child);
     let max_score = format!("{}", max_score);
 
-    let mut newargs: Vec<String> = vec![key, min_score, max_score];
+    let mut newargs: Vec<String> = vec![key.clone(), min_score, max_score];
     if withindices {
         newargs.push(String::from("withscores"));
     }
@@ -512,6 +342,53 @@ fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
         },
         Err(err) => return Err(err)
     }
+}
+
+///
+/// H3.CELL key h3idx [WITHINDICES] [LIMIT offset count]
+///
+/// Returns an array of the elements in the zset that are contained within the H3 cell
+/// for the given index
+///
+fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
+    let syntax_err_msg = "syntax error. Try H3.CELL key h3idx [WITHINDICES] [LIMIT offset count]";
+    if args.len() < 3 {
+        return Err(RedisError::from(syntax_err_msg));
+    }
+
+    let mut args = args.into_iter().skip(1);
+    let key = args.next_string()?;
+    let h3key = args.next_string()?;
+    let mut withindices = false;
+    let mut limit = false;
+    let mut offset = 0;
+    let mut count = 0;
+
+    let h3idx = match str_to_h3(&h3key) {
+        Ok(h3idx) => h3idx,
+        Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+    };
+
+    while let Ok(arg) = args.next_string() {
+        match arg.to_uppercase().as_str() {
+            "WITHINDICES" => {
+                withindices = true;
+            }
+            "LIMIT" => {
+                limit = true;
+                if args.len() < 2 {
+                    return Err(RedisError::from(syntax_err_msg));
+                }
+                offset = args.next_i64()?;
+                count = args.next_i64()?;
+            }
+            _ => {
+                return Err(RedisError::from(syntax_err_msg));
+            }
+        }
+    }
+
+    get_cell_members(ctx, &key, &h3idx, withindices, limit, offset, count)
 }
 
 ///
