@@ -32,7 +32,7 @@ fn h3status_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
 ///
 fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     if args.len() < 5 || (args.len() - 2) % 3 != 0 {
-        return Err(RedisError::from(
+        return Err(RedisError::Str(
             "syntax error. Try H3.ADD key [lng1] [lat1] [name1] [lng2] [lat2] [name2] ... "
         ));
     }
@@ -62,7 +62,7 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                 newargs.push(format!("{}", score));
                 newargs.push(name.clone());
             },
-            _ => return Err(RedisError::from("Invalid lng or lat value"))
+            _ => return Err(RedisError::Str("Invalid lng or lat value"))
         }
     }
 
@@ -86,7 +86,7 @@ fn h3add_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 ///
 fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     if args.len() < 4 || args.len() % 2 != 0 {
-        return Err(RedisError::from(
+        return Err(RedisError::Str(
             "syntax error. Try H3.ADDBYINDEX key [h3idx1] [name1] [h3idx2] [name2] ... "
         ));
     }
@@ -108,7 +108,7 @@ fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
             Ok(h3idx) => {
                 // verify resolution 15
                 if h3idx.resolution() != MAX_RESOLUTION {
-                    return Err(RedisError::from("Invalid h3idx resolution (must be 15)"))
+                    return Err(RedisError::Str("Invalid h3idx resolution (must be 15)"))
                 }
                 // this line is not optimal, the line after would be put member is not pub
                 let h3ll = u64::from_str_radix(h3idx.to_string().as_str(), 16).unwrap();
@@ -118,7 +118,7 @@ fn h3addbyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                 newargs.push(format!("{}", score));
                 newargs.push(name.clone());
             },
-            Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+            Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
         }
     }
 
@@ -158,7 +158,7 @@ fn get_zscores(ctx: &Context, key: &String, elems: Vec<String>) -> RedisResult {
                     RedisValue::Null => scores.push(RedisValue::Null),
                     _ => {
                         println!("v: {:?}", v);
-                        return Err(RedisError::from("Unexpected type (SimpleString or Null)"))
+                        return Err(RedisError::Str("Unexpected type (SimpleString or Null)"))
                     }
                 }
             },
@@ -194,12 +194,12 @@ fn get_zscores_as_h3_indices(ctx: &Context, key: &String, elems: Vec<String>) ->
         },
         Ok(v) => {
             println!("v: {:?}", v);
-            return Err(RedisError::from("Unexpected type (not Array)"));
+            return Err(RedisError::Str("Unexpected type (not Array)"));
         },
         Err(err) => return Err(err)
     };
     if opt_err.is_some() {
-        return Err(RedisError::from(opt_err.unwrap()))
+        return Err(RedisError::Str(opt_err.unwrap()))
     }
     Ok(h3_indices)
 }
@@ -269,7 +269,7 @@ fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: b
                     offset: i64, count: i64) -> RedisResult {
     // let h3idx = match str_to_h3(&h3key) {
     //     Ok(h3idx) => h3idx,
-    //     Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+    //     Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
     // };
 
     // it would be better to get the u64 value from h3idx (commented line under next),
@@ -311,7 +311,7 @@ fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: b
                             RedisValue::SimpleString(s) => s,
                             _ => {
                                 println!("v: {:?}", &v);
-                                return Err(RedisError::from("Unexpected type (not SimpleString)"))
+                                return Err(RedisError::Str("Unexpected type (not SimpleString)"))
                             }
                         };
                         if withindices && i % 2 != 0 {
@@ -322,7 +322,7 @@ fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: b
                                 Ok(h3idx) => {
                                     newvec.push(h3idx.to_string().into())
                                 },
-                                Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+                                Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
                             }
                         } else {
                             newvec.push(elem.into())
@@ -336,7 +336,7 @@ fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: b
                 RedisValue::Null => Ok(RedisValue::Null),
                 _ => {
                     println!("v: {:?}", v);
-                    return Err(RedisError::from("Unexpected type (not Array or Null)"))
+                    return Err(RedisError::Str("Unexpected type (not Array or Null)"))
                 }
             }
         },
@@ -353,7 +353,7 @@ fn get_cell_members(ctx: &Context, key: &String, h3idx: &H3Index, withindices: b
 fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let syntax_err_msg = "syntax error. Try H3.CELL key h3idx [WITHINDICES] [LIMIT offset count]";
     if args.len() < 3 {
-        return Err(RedisError::from(syntax_err_msg));
+        return Err(RedisError::Str(syntax_err_msg));
     }
 
     let mut args = args.into_iter().skip(1);
@@ -366,7 +366,7 @@ fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let h3idx = match str_to_h3(&h3key) {
         Ok(h3idx) => h3idx,
-        Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+        Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
     };
 
     while let Ok(arg) = args.next_string() {
@@ -377,13 +377,13 @@ fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
             "LIMIT" => {
                 limit = true;
                 if args.len() < 2 {
-                    return Err(RedisError::from(syntax_err_msg));
+                    return Err(RedisError::Str(syntax_err_msg));
                 }
                 offset = args.next_i64()?;
                 count = args.next_i64()?;
             }
             _ => {
-                return Err(RedisError::from(syntax_err_msg));
+                return Err(RedisError::Str(syntax_err_msg));
             }
         }
     }
@@ -399,7 +399,7 @@ fn h3cell_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 ///
 fn h3count_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     if args.len() != 3 {
-        return Err(RedisError::from("syntax error. Try H3.COUNT key h3idx"));
+        return Err(RedisError::Str("syntax error. Try H3.COUNT key h3idx"));
     }
 
     let mut args = args.into_iter().skip(1);
@@ -408,7 +408,7 @@ fn h3count_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
     let h3idx = match str_to_h3(&h3key) {
         Ok(h3idx) => h3idx,
-        Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+        Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
     };
 
     // it would be better to get the u64 value from h3idx (commented line under next),
@@ -439,14 +439,14 @@ fn h3count_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let syntax_err_msg = "syntax error. Try H3.SCAN key cursor [MATCH pattern] [COUNT count]";
     if args.len() < 3 {
-        return Err(RedisError::from(syntax_err_msg));
+        return Err(RedisError::Str(syntax_err_msg));
     }
 
     let mut args = args.into_iter().skip(1);
     let key = args.next_string()?;
     let cursor = match args.next_i64() {
         Ok(c) => c,
-        Err(_err) => return Err(RedisError::from("invalid cursor"))
+        Err(_err) => return Err(RedisError::Str("invalid cursor"))
     };
     let mut match_pattern: Option<String> = None;
     let mut count: Option<i64> = None;
@@ -456,7 +456,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
             "MATCH" => match_pattern = Some(args.next_string()?),
             "COUNT" => count = Some(args.next_i64()?),
             _ => {
-                return Err(RedisError::from(syntax_err_msg));
+                return Err(RedisError::Str(syntax_err_msg));
             }
         }
     }
@@ -484,7 +484,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                 let next_cursor = match zscan_result.next() {
                     Some(RedisValue::SimpleString(s)) => s,
                     _ => {
-                        return Err(RedisError::from("Unexpected type (not SimpleString)"))
+                        return Err(RedisError::Str("Unexpected type (not SimpleString)"))
                     }
                 };
                 h3scan_result.push(next_cursor.into());
@@ -498,7 +498,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                             let elem: &String = match &elems_with_scores[i] {
                                 RedisValue::SimpleString(s) => s,
                                 _ => {
-                                    return Err(RedisError::from("Unexpected type (not SimpleString)"))
+                                    return Err(RedisError::Str("Unexpected type (not SimpleString)"))
                                 }
                             };
                             if i % 2 != 0 {
@@ -509,7 +509,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                                     Ok(h3idx) => {
                                         elems_with_indices.push(h3idx.to_string().into())
                                     },
-                                    Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+                                    Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
                                 }
                             } else {
                                 elems_with_indices.push(elem.into())
@@ -519,7 +519,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                         }
                         h3scan_result.push(elems_with_indices.into());
                     },
-                    _ => return Err(RedisError::from("Unexpected type (not Array)"))
+                    _ => return Err(RedisError::Str("Unexpected type (not Array)"))
                 }
 
                 Ok(h3scan_result.into())
@@ -528,7 +528,7 @@ fn h3scan_command(ctx: &Context, args: Vec<String>) -> RedisResult {
             RedisValue::Null => Ok(RedisValue::Null),
             _ => {
                 println!("v: {:?}", &v);
-                return Err(RedisError::from("Unexpected type (not Array or Null)"))
+                return Err(RedisError::Str("Unexpected type (not Array or Null)"))
             }
         },
         Err(err) => return Err(err)
@@ -546,7 +546,7 @@ fn unit_str_to_conversion(unit: &String) -> Result<f64,RedisError> {
     if conversion > -1.0 {
         Ok(conversion)
     } else {
-        Err(RedisError::from("unsupported unit provided. please use m, km, ft, mi"))
+        Err(RedisError::Str("unsupported unit provided. please use m, km, ft, mi"))
     }
 }
 
@@ -558,7 +558,7 @@ fn unit_str_to_conversion(unit: &String) -> Result<f64,RedisError> {
 fn h3dist_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let syntax_err_msg = "syntax error. Try H3.DIST key elem1 elem2 [unit]";
     if args.len() < 4 {
-        return Err(RedisError::from(syntax_err_msg));
+        return Err(RedisError::Str(syntax_err_msg));
     }
 
     let mut args = args.into_iter().skip(1);
@@ -589,7 +589,7 @@ fn h3dist_command(ctx: &Context, args: Vec<String>) -> RedisResult {
             if dist > -1.0 {
                 Ok(format!("{:.4}", dist).into())
             } else {
-                Err(RedisError::from("error trying to get distance"))
+                Err(RedisError::Str("error trying to get distance"))
             }
         },
         Err(err) => Err(err)
@@ -604,7 +604,7 @@ fn h3dist_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
     let syntax_err_msg = "syntax error. Try H3.REMBYINDEX key h3idx1 ... [h3idxN]";
     if args.len() < 3 {
-        return Err(RedisError::from(syntax_err_msg));
+        return Err(RedisError::Str(syntax_err_msg));
     }
 
     let mut args = args.into_iter().skip(1);
@@ -619,7 +619,7 @@ fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
         let h3idx = match str_to_h3(&h3key) {
             Ok(h3idx) => h3idx,
-            Err(_err) => return Err(RedisError::from("Invalid h3idx value"))
+            Err(_err) => return Err(RedisError::Str("Invalid h3idx value"))
         };
     
         match get_cell_members(ctx, &key, &h3idx, false, false, 0, 0) {
@@ -638,7 +638,7 @@ fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                                     },
                                     _ => {
                                         println!("v: {:?}", &v);
-                                        return Err(RedisError::from("Unexpected types (not SimpleString)"))
+                                        return Err(RedisError::Str("Unexpected types (not SimpleString)"))
                                     }
                                 }
                                 i += 1;
@@ -651,7 +651,7 @@ fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
                     },
                     _ => {
                         println!("v: {:?}", v);
-                        return Err(RedisError::from("Unexpected type (not Array or Null)"))
+                        return Err(RedisError::Str("Unexpected type (not Array or Null)"))
                     }
                 }
             },
@@ -675,35 +675,35 @@ fn h3rembyindex_command(ctx: &Context, args: Vec<String>) -> RedisResult {
 
 /// a translation of the GEORADIUS command
 fn h3radius_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
+    Err(RedisError::Str("Command not implemented"))
 }
 
 /// a translation of the GEORADIUSBYMEMBER command
 fn h3radiusbyindex_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
+    Err(RedisError::Str("Command not implemented"))
 }
 
 /// a translation of the GEOSEARCH command
 fn h3search_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
+    Err(RedisError::Str("Command not implemented"))
 }
 
 /// a translation of the GEOSEARCHSTORE command
 fn h3searchstore_command(_ctx: &Context, _args: Vec<String>) -> RedisResult {
-    Err("Command not implemented".into())
+    Err(RedisError::Str("Command not implemented"))
 }
 
 //////////////////////////////////////////////////////
 
-pub extern "C" fn init(_raw_ctx: *mut rawmod::RedisModuleCtx) -> c_int {
-    0
-}
+// pub extern "C" fn init(_raw_ctx: *mut rawmod::RedisModuleCtx) -> c_int {
+//     0
+// }
 
 redis_module! {
     name: "h3",
     version: 1,
     data_types: [],
-    init: init,
+    // init: init,
     commands: [
         ["h3.status", h3status_command, "", 0, 0, 0],
         ["h3.add", h3add_command, "write deny-oom", 1, 1, 1],
